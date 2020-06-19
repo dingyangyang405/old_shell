@@ -1,0 +1,209 @@
+#!/usr/bin/php
+<?php
+header("Content-Type:text/html;charset=UTF-8");
+define('LOGPATH', '/var/www/bigpicture/log.txt');
+define('ERRORLOGPATH', '/var/www/bigpicture/errorlog.txt');
+define('LOGBACKPATH', '/var/www/bigpicture/logback.txt');
+define('KEHUEMAIL', '/var/www/bigpicture/kehuemail/');
+define('LIMITSIZE', 300);
+define('IP', "116.62.60.27");
+define('USERNAME', "apiedusoho");
+define('PASSWORD', "AHnsocTRpef0TG5Hxk");
+define('DATABASE', "api.edusoho.net");
+define('TABLE', "user");
+
+function myErrorHandler($errno, $errstr, $errfile, $errline) {
+    file_put_contents(ERRORLOGPATH, "\n<br>".date('Y-m-d H:i:s',time())."\n<br>".$errno. $errstr. " in ".$errfile. " on line ".$errline."<br>\n", FILE_APPEND);
+ }
+
+set_error_handler("myErrorHandler");
+
+function selectUrlFromDb() 
+{
+    $conn=new mysqli(IP,USERNAME,PASSWORD,DATABASE);
+    if(mysqli_connect_errno())
+    {
+        return false;
+    }
+    $sql="select id,siteName,licenseDomains,contact,email from ".TABLE." where enabled=1 and locked=0 and level in ('basic','personal','medium','advanced','gold') and endDate > unix_timestamp(now()) and licenseDomains !='';";
+    $conn->query("set names utf8");
+    $result=$conn->query($sql);
+    if($result) {
+        $datas=array();
+        $result->data_seek(0);
+    for($i=0;$res=$result->fetch_assoc();$i++) {
+            $datas[$i]['id']=$res['id'];
+            $datas[$i]['siteName']=$res['siteName'];
+            $datas[$i]['licenseDomains']=$res['licenseDomains'];
+            $datas[$i]['contact']=$res['contact'];
+            $datas[$i]['email']=$res['email'];
+        }
+    }
+    else{
+        return false;
+    }
+    $result->free();
+    $conn->close();
+    return $datas;
+}
+
+
+
+
+function getPictureSize()
+{
+    $datas=selectUrlFromDb();
+    foreach( $datas as $key=>$data){   
+        if (empty(trim($data['licenseDomains']))) {  
+            unset($datas[$key]); 
+        }  
+    }
+    file_put_contents(LOGPATH, "<h1 style=\"font-family:'YaHei';text-align:center;font-size:22px;line-height:24px;\">"."EduSoho网校健康巡检报告汇总<br></h1><h5 style=\"text-align:center;line-height:24px;\">".date('Y-m-d H:i:s',time())."</h5>");
+    file_put_contents(LOGPATH, "本次健康巡检共对 ".count($datas)." 台服务器进行了首页大图扫描, 大图阀值为：".LIMITSIZE."KB，如下是首页存在大图的网校列表及相应图片的地址：<br>\n", FILE_APPEND);
+    foreach ($datas as $data) {
+        $data['licenseDomains']=trim($data['licenseDomains']);
+        getPictureUrl($data);
+    }
+    $subject='EduSoho网校健康巡检报告汇总';
+    $body=file_get_contents(LOGPATH);
+    $to=array('dingyangyang@howzhi.com', 'guxian@edusoho.com', 'zhouxiaohui@howzhi.com');
+    foreach ($to as $key => $email) {
+        sendMail($subject,$body,$email);
+    }
+}
+
+function getPictureUrl($data)
+{
+    if(strpos($data['licenseDomains'],';')!== false and !empty($data['licenseDomains'])) {
+        $urlArray = explode(';',$data['licenseDomains']);
+        foreach ($urlArray as $key => $url) {
+            if (url_exists("http://".$url."/")) {
+                $text = file_get_contents("http://".$url."/");
+                $data['licenseDomains']=$url;
+                break;
+            } else{
+                $text = null;
+            }
+        }
+    } else {
+        $text = url_exists("http://".$data['licenseDomains']."/") ? file_get_contents("http://".$data['licenseDomains']."/") : null; 
+    }
+    preg_match_all('/<img[^>]*>/i', $text, $img); 
+    $img = $img[0];
+    if (empty($img)) {
+        file_put_contents(LOGPATH, "\n<br>用户ID：".$data['id']."&nbsp;&nbsp;&nbsp;&nbsp;".$data['siteName']."    &nbsp;&nbsp;&nbsp;&nbsp; "."http://".$data['licenseDomains']."/"."    &nbsp;&nbsp;没有查询到图片！<br>\n", FILE_APPEND);
+    } else {
+        $match = array();
+        $bigPicture = array();
+        foreach ($img as $key => $value) {
+            preg_match_all('/http:[^"]*/i', $value, $matched);
+            if (isset($matched[0][0])) {
+                $match[] = $matched[0][0];
+            } else {
+                $newSrc = substr($value, strpos($value, 'src')+5);
+                $newSrc = substr($newSrc, strpos($newSrc, '/')+1);
+                $end = strpos($newSrc, '"');
+                $match[] = "http://".$data['licenseDomains']."/".(substr($newSrc, 0, $end));         
+            }
+        }
+
+        $match = array_unique($match);
+        getPictureSizeFromImgUrls($data, $match);
+    }
+} 
+
+function getPictureSizeFromImgUrls($data, $imgUrls)   
+{
+    foreach ($imgUrls as $key => $imgUrl) {
+        if (url_exists($imgUrl)) {
+            $handle = fopen($imgUrl, 'rb');    
+            $meta = stream_get_meta_data($handle);  
+            $dataInfo = isset($meta['wrapper_data']['headers']) ? $meta['wrapper_data']['headers'] : $meta['wrapper_data']; 
+            foreach ($dataInfo as $va) {  
+                if ( preg_match('/length/iU', $va)) {
+                    $ts = explode(':', $va);  
+                    $result = trim(array_pop($ts));  
+                    break;  
+                }  else {
+                    $result = 0;
+                }
+            } 
+
+            fclose($handle);
+            $size = (int)($result/1024);
+            if( $size > LIMITSIZE && strpos($imgUrl, $data['licenseDomains'])) {
+                $bigPicture['size'][] = $size;
+                $bigPicture['url'][] = $imgUrl;
+            }    
+        }
+    }
+    if (!empty($bigPicture)) {
+        file_put_contents(LOGPATH, "\n<br>用户ID：".$data['id']."    &nbsp;&nbsp;&nbsp;&nbsp; ".$data['siteName']."    &nbsp;&nbsp;&nbsp;&nbsp; "."http://".$data['licenseDomains']."/"."    &nbsp;&nbsp;&nbsp;&nbsp;共有  ".count($bigPicture['size'])."  张图片的大小超过 ".LIMITSIZE."KB<br>\n", FILE_APPEND);
+        foreach ($bigPicture['size'] as $key => $imgUrl) {
+            file_put_contents(LOGPATH, $bigPicture['url'][$key]."    &nbsp;&nbsp;&nbsp;&nbsp;".$bigPicture['size'][$key]."KB<br>\n", FILE_APPEND);
+        }
+	file_put_contents(KEHUEMAIL.$data['siteName'],"<h1 style=\"font-family:'YaHei';text-align:center;font-size:22px;line-height:24px;\">"."EduSoho网校健康巡检报告<br></h1><h5 style=\"text-align:center;line-height:24px;\">".date('Y-m-d H:i:s',time())."</h5>".$data['siteName']."的管理员：\n<br>"." &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;您好，EduSoho SaaS运维团队对您的网校（".$data['licenseDomains']."）例行健康巡检时，检测到贵网校首页有".count($bigPicture['size'])."张图片的大小超过了".LIMITSIZE."KB，过大的图片将会导致服务器带宽压力增大，网站可支撑的在线人数减少，打开首页时会出现加载缓慢的情况，造成用户浏览网站体验不佳。
+\n<br><br>以下是大于".LIMITSIZE."KB的网校图片链接地址"."：\n<br><br>");
+	foreach ($bigPicture['size'] as $key => $imgUrl) {
+            file_put_contents(KEHUEMAIL.$data['siteName'], "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;".$bigPicture['url'][$key]."    &nbsp;&nbsp;&nbsp;&nbsp;".$bigPicture['size'][$key]."KB<br>\n", FILE_APPEND);
+        }
+        file_put_contents(KEHUEMAIL.$data['siteName'],"<br>\n建议：将以上图片压缩处理至".LIMITSIZE."KB以下重新上传，降低服务器带宽压力，提高网校的流畅体验。<br>\n<b>图片优化教程及图片大小详细建议请看： <a href='http://www.qiqiuyu.com/my/course/373' title='教程地址'>http://www.qiqiuyu.com/my/course/373 </a></b> 。<br>\n<br>\n &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;感谢您使用EduSoho SaaS服务，EduSoho SaaS运维团队将为您提供更多高附加值的服务，保障网校正常运营，降低网校运营成本！<br>\n<br>\n顺祝 商祺！\n<br><br><br><h5 style=\"text-align:center;\">"."如有疑问，请联系官方运营人员或拨打EduSoho官方客服电话：400-804-1114。</h5>\n<h5 style=\"text-align:center;\">"."杭州阔知网络科技有限公司<br></h5>\n", FILE_APPEND);
+        sendMail('EduSoho网校安全巡检报告',file_get_contents(KEHUEMAIL.$data['siteName']),'dingyangyang@howzhi.com');
+        // sendMail('EduSoho网校安全巡检报告',file_get_contents(KEHUEMAIL.$data['siteName']),'guxian@edusoho.com');
+        // sendMail('EduSoho网校安全巡检报告',file_get_contents(KEHUEMAIL.$data['siteName']),$data['email']);
+    }     
+}     
+
+function url_exists($url) 
+{ 
+    $curl = curl_init($url);
+    curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 5); 
+    curl_setopt($curl, CURLOPT_NOBODY, true); 
+    $result = curl_exec($curl); 
+    $found = false; 
+    if ($result !== false) {  
+        $statusCode = curl_getinfo($curl, CURLINFO_HTTP_CODE); 
+        if ($statusCode == 200) { 
+            $found = true; 
+        } 
+    } 
+    curl_close($curl);
+    return $found; 
+}
+
+function sendMail($subject,$body,$to) {
+        
+    date_default_timezone_set('Asia/Shanghai');
+    require_once('class.phpmailer.php');
+    require_once('class.smtp.php');
+    $mail = new PHPMailer;
+    $mail->CharSet = 'UTF-8';
+    $mail->isSMTP();                                      
+    $mail->Host = 'mail.howzhi.net';  
+    $mail->SMTPAuth = true;                               
+    $mail->Username = 'no-reply@howzhi.net';                 
+    $mail->Password = 'topxiaxianoreply';                                                  
+    $mail->Port = 25;                              
+    $mail->setFrom('no-reply@howzhi.net', 'EduSoho运维团队');
+
+    $mail->addAddress($to);               
+
+    $mail->addReplyTo('no-reply@howzhi.net', 'Do Not Reply!');
+    $mail->isHTML(true);                                 
+    $mail->Subject = $subject;
+    $mail->Body    = $body;
+    $mail->AltBody = 'auto reply';
+
+    if(!$mail->send()) {
+        file_put_contents(ERRORLOGPATH, date('Y-m-d H:i:s',time())."    Message could not be sent to ".$to."! \nMailer Error : ".$mail->ErrorInfo."\nSubject : ".$subject.".\nContent : ".$body."\n", FILE_APPEND);
+    } else {
+        file_put_contents(LOGBACKPATH, date('Y-m-d H:i:s',time())."    Message has been sent to ".$to.".\nSubject : ".$subject.".\nContent : ".$body."\n", FILE_APPEND);
+    }
+}
+
+###############调用方法##################
+getPictureSize();
+
+sendMail('大图报警错误日志',file_get_contents(ERRORLOGPATH),'dingyangyang@howzhi.com');
+file_put_contents(ERRORLOGPATH, '');
+
